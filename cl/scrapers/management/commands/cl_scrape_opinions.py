@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from asgiref.sync import async_to_sync
+from courts_db import find_court_ids_by_name
 from django.core.files.base import ContentFile
 from django.core.management.base import CommandError
 from django.db import transaction
@@ -238,6 +239,17 @@ class Command(VerboseCommand):
         logger.debug(f"#{len(site)} opinions found.")
         added = 0
         for i, item in enumerate(site):
+            # Implemented for nymisc families: nyfam, nycciv, nyccrim,
+            # nysupreme, nysurrogate, nycity, nydistrict, nycounty,
+            # nyjustice, nyctclaims
+            child_court = None
+            if court_str.startswith("ny") and item.get("child_courts"):
+                child_court_str = find_court_ids_by_name(
+                    item["child_courts"], False, "New York", False
+                )
+                if child_court_str:
+                    child_court = Court.objects.get(pk=child_court_str[0])
+
             # Minnesota currently rejects Courtlistener and Juriscraper as a User Agent
             if court_str in ["minn", "minnctapp"]:
                 headers = site.headers
@@ -303,7 +315,7 @@ class Command(VerboseCommand):
             dup_checker.reset()
 
             docket, opinion, cluster, citations = make_objects(
-                item, court, sha1_hash, content
+                item, child_court or court, sha1_hash, content
             )
 
             save_everything(
