@@ -78,61 +78,92 @@ def make_objects(
     court: Court,
     sha1_hash: str,
     content: bytes,
+    opinion_groups: Dict = {},
 ) -> Tuple[Docket, Opinion, OpinionCluster, List[Citation]]:
     """Takes the meta data from the scraper and associates it with objects.
 
     Returns the created objects.
     """
-    blocked = item["blocked_statuses"]
-    if blocked:
-        date_blocked = date.today()
+    docket = item.get("Docket")
+    if docket is not None:
+        # Case when juriscraper returned structured objects
+        docket["court_id"] = court.id  # correct in case of child courts
+        cluster = OpinionCluster(**item["OpinionCluster"])
+        group_id = item.get("group_id")
+
+        # The only way (currently) to identify OpinionClusters from scrapers
+        # Is by an explicit marking or id by the scraper
+        # We use an `opinion_groups` dictionary to keep track of objects created
+        # for that group
+        if group_id is not None:
+            if opinion_groups.get("group_id"):
+                cluster = opinion_groups["group_id"]["cluster"]
+                docket = opinion_groups["group_id"]["docket"]
+            else:
+                opinion_groups["group_id"] = {
+                    "cluster": cluster,
+                    "docket": update_or_create_docket(**item["Docket"]),
+                }
+                docket = opinion["group_id"]["docket"]
+        else:
+            docket = update_or_create_docket(**item["Docket"])
+
+        opinion = Opinion(sha1=sha1_hash, **item["Opinion"])
+        cites = item["citations"]
     else:
-        date_blocked = None
+        blocked = item["blocked_statuses"]
+        if blocked:
+            date_blocked = date.today()
+        else:
+            date_blocked = None
 
-    case_name_short = item.get("case_name_shorts") or cnt.make_case_name_short(
-        item["case_names"]
-    )
+        case_name_short = item.get(
+            "case_name_shorts"
+        ) or cnt.make_case_name_short(item["case_names"])
 
-    docket = update_or_create_docket(
-        item["case_names"],
-        case_name_short,
-        court.pk,
-        item.get("docket_numbers", ""),
-        item.get("source") or Docket.SCRAPER,
-        blocked=blocked,
-        date_blocked=date_blocked,
-    )
+        docket = update_or_create_docket(
+            item["case_names"],
+            case_name_short,
+            court.pk,
+            item.get("docket_numbers", ""),
+            item.get("source") or Docket.SCRAPER,
+            blocked=blocked,
+            date_blocked=date_blocked,
+        )
 
-    cluster = OpinionCluster(
-        judges=item.get("judges", ""),
-        date_filed=item["case_dates"],
-        date_filed_is_approximate=item["date_filed_is_approximate"],
-        case_name=item["case_names"],
-        case_name_short=case_name_short,
-        source=item.get("cluster_source") or SOURCES.COURT_WEBSITE,
-        precedential_status=item["precedential_statuses"],
-        nature_of_suit=item.get("nature_of_suit", ""),
-        blocked=blocked,
-        date_blocked=date_blocked,
-        syllabus=item.get("summaries", ""),
-    )
+        cluster = OpinionCluster(
+            judges=item.get("judges", ""),
+            date_filed=item["case_dates"],
+            date_filed_is_approximate=item["date_filed_is_approximate"],
+            case_name=item["case_names"],
+            case_name_short=case_name_short,
+            source=item.get("cluster_source") or SOURCES.COURT_WEBSITE,
+            precedential_status=item["precedential_statuses"],
+            nature_of_suit=item.get("nature_of_suit", ""),
+            blocked=blocked,
+            date_blocked=date_blocked,
+            syllabus=item.get("summaries", ""),
+        )
 
-    cites = [item.get(key, "") for key in ["citations", "parallel_citations"]]
+        opinion = Opinion(
+            type=Opinion.COMBINED,
+            sha1=sha1_hash,
+            download_url=item["download_urls"],
+        )
+
+        cites = [
+            item.get(key, "") for key in ["citations", "parallel_citations"]
+        ]
+
     citations = [
         make_citation(cite, cluster, court.id) for cite in cites if cite
     ]
+
+    if court.id == "tax":
+        opinion.download_url = ""
+
     # Remove citations that did not parse correctly.
     citations = [cite for cite in citations if cite]
-
-    url = item["download_urls"]
-    if court.id == "tax":
-        url = ""
-
-    opinion = Opinion(
-        type=Opinion.COMBINED,
-        sha1=sha1_hash,
-        download_url=url,
-    )
 
     cf = ContentFile(content)
     extension = get_extension(content)
@@ -314,7 +345,11 @@ class Command(VerboseCommand):
             )
 
             docket, opinion, cluster, citations = make_objects(
-                item, child_court or court, sha1_hash, content
+                item,
+                child_court or court,
+                sha1_hash,
+                content,
+                site.opinion_groups,
             )
 
             save_everything(
